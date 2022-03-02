@@ -16,8 +16,8 @@ import numpy as np
 import pandas as pd 
 
 pd.set_option('display.max_columns',100)
-pd.set_option('precision', 3)
-pd.set_option('display.float_format', lambda x: '%.3f' % x)
+pd.set_option('precision', 30)
+pd.set_option('display.float_format', lambda x: '%.18f' % x)
 # pd.set_option('display.max_colwidth',15) 
 
 s_path = os.path.dirname(os.path.realpath(__file__))
@@ -32,11 +32,14 @@ def run_query(s_query, http_query='https://api.thegraph.com/subgraphs/name/unisw
     if request.status_code == 200:
         return request.json()
 
+#%% 
 
 # reading basic mints info extracted from Uniswap subgraph
+# filter pool id:  mints(where: {pool: "0x5777d92f208679db4b9778590fa3cab3ac9e2168"}, first: 1000, skip: %d){
+#   mints(first: 1000, skip: %d){
 mints = """
 {
-  mints(first: 1000, skip: %d){
+  mints(where: {pool: "0x5777d92f208679db4b9778590fa3cab3ac9e2168"}, first: 1000, skip: %d){
     timestamp
     pool{
       id
@@ -231,9 +234,6 @@ aggregate_and_plot('burns')
 aggregate_and_plot('mints')
 
 #%% 
-aggregate_and_plot('burns')
-
-#%% 
 df_blockNumber['swap'] = df_swaps.groupby('transaction.blockNumber')['timestamp'].count()
 
 df_jit_lp.sort_values(
@@ -241,3 +241,99 @@ df_jit_lp.sort_values(
   ignore_index= True,
   inplace=True
   )
+
+# %%
+pool_state = """
+{
+  pool (id: "0x5777d92f208679db4b9778590fa3cab3ac9e2168"){
+    id
+    token0 {
+      symbol
+      id
+      decimals
+    }
+    token1 {
+      symbol
+      id
+      decimals
+    }
+    liquidity
+    sqrtPrice
+    token0Price
+    token1Price
+    volumeToken0
+    volumeToken1 
+    ticks {
+      tickIdx
+      liquidityGross
+      volumeToken0
+      volumeToken1
+    }
+  }
+}
+
+"""
+
+result = run_query(pool_state)
+df_state = pd.json_normalize(result, record_path=['data','pool'])
+df_ticks = pd.json_normalize(result, record_path=['data','pool','ticks'])
+
+# %%
+sqrtPrice = df_state['sqrtPrice'].astype(float)/(pow(2,96))
+pool_price = pow(sqrtPrice,2)
+pool_price = pool_price * pow(10, 12)
+df_state['pool_price'] = pool_price
+# %%
+np.sqrt(
+  df_state['volumeToken0'].astype(float)/pow(10, int(df_state['token0.decimals'])) 
+  * df_state['volumeToken1'].astype(float)/pow(10, int(df_state['token1.decimals']))
+  )
+
+# %%
+positions = """
+{
+  positions (where: {pool: "0x5777d92f208679db4b9778590fa3cab3ac9e2168"}, first: 1000, skip: %d){
+		id
+    pool{
+      id
+    }
+    owner
+    tickLower{
+      tickIdx
+      liquidityGross
+    }
+    tickUpper{
+      tickIdx
+      liquidityGross
+    }
+    liquidity
+    depositedToken0
+    depositedToken1
+    withdrawnToken0
+    withdrawnToken1
+    transaction{
+      id
+      timestamp
+    }
+  }
+}
+"""
+
+df_positions = pd.DataFrame()
+
+for i in range(7):
+  # The `skip` argument must be between 0 and 5000
+  skip = ((i-1) * 1000) if i > 0 else 0
+  # can't use str.format() because of {} unformatted in query string
+  result = run_query((positions % skip))
+  try:
+    df_i = pd.json_normalize(result, record_path=['data','positions'])
+    df_positions = df_positions.append(df_i, ignore_index=True)
+  except KeyError:
+    print(result)
+
+df_positions['date'] = pd.to_datetime(df_positions['transaction.timestamp'], unit='s', origin='unix')
+
+# %%
+df_positions['liquidity'].astype(float).sum()
+# %%
